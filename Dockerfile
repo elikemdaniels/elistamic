@@ -1,40 +1,61 @@
-# ---------- Base PHP Image ----------
-FROM dunglas/frankenphp:php8.4
+# ---------- Stage 1: Composer ----------
+FROM composer:2 AS composer
 
-# Install required PHP extensions
-RUN install-php-extensions \
-    ctype curl dom fileinfo filter hash mbstring openssl pcre pdo session tokenizer xml \
-    gd exif intl bcmath
-
-# Set working directory
 WORKDIR /app
-
-# ---------- Install Composer Dependencies ----------
 COPY composer.json composer.lock ./
 RUN composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist
 
-# ---------- Install Node Dependencies ----------
+# ---------- Stage 2: Node ----------
+FROM node:22 AS node
+
+WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# ---------- Copy Application ----------
+# ---------- Stage 3: App ----------
+FROM dunglas/frankenphp:php8.4
+
+# Install system libs for GD
+RUN apt-get update && apt-get install -y \
+    libjpeg-dev \
+    libpng-dev \
+    libwebp-dev \
+    libfreetype6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install PHP extensions
+RUN install-php-extensions \
+    gd exif intl bcmath \
+    pdo_mysql \
+    ctype curl dom fileinfo filter hash mbstring openssl pcre session tokenizer xml
+
+WORKDIR /app
+
+# Copy vendor from composer stage
+COPY --from=composer /app/vendor ./vendor
+COPY --from=composer /app/composer.json ./composer.json
+COPY --from=composer /app/composer.lock ./composer.lock
+
+# Copy node_modules from node stage
+COPY --from=node /app/node_modules ./node_modules
+
+# Copy rest of app
 COPY . .
 
-# ---------- Build Frontend ----------
+# Build frontend
 RUN npm run build
 
-# ---------- Laravel Optimization ----------
+# Fix permissions
 RUN mkdir -p storage/framework/{sessions,views,cache,testing} \
     storage/logs bootstrap/cache \
     && chmod -R 775 storage bootstrap/cache
 
+# Optimize Laravel
 RUN php artisan config:cache \
  && php artisan route:cache \
  && php artisan view:cache
 
-# ---------- Expose Railway Port ----------
 ENV PORT=8080
 EXPOSE 8080
 
-# ---------- Start Server ----------
 CMD ["frankenphp", "run", "--port=8080"]
